@@ -1,0 +1,144 @@
+# Scraping steps:
+# 1. Goto: 
+# https://www.cancer.gov/about-cancer/treatment/drugs
+#   Grab the name and goto step two
+
+
+# 2. The description of the drug:
+# https://www.cancer.gov/about-cancer/treatment/drugs/abemaciclib
+
+#  Get the maker, name 
+# 3. Goto drug site to look up cost:
+# https://www.drugs.com/price-guide/zytiga
+# Generate urls based on input file in spider:
+# https://stackoverflow.com/questions/42136821/file-input-to-scrapy-giving-issues
+
+# 4. Cost calculation based on life expectancy of the type of cancer
+#      https://en.wikipedia.org/wiki/List_of_cancer_mortality_rates_in_the_United_States
+
+from scrapy import Spider, Request
+from drug.items import DrugItem
+import re
+
+class DrugSpider(Spider):
+  name = 'drug_spider'
+  allowed_urls = ['https://www.cancer.gov/','https://www.drugs.com/']
+  start_urls   = ['https://www.cancer.gov/about-cancer/treatment/drugs']
+
+  def parse(self, response):
+      all_drugname = response.xpath('//ul[@class="no-bullets no-description"]/li/a/text()').getall()
+      about_urls   = response.xpath('//ul[@class="no-bullets no-description"]/li/a/@href').getall()
+
+      # Some href link is full address, some are just extensions. Strip the full addresses
+      # that is later added to all. 
+      clean_about_urls = [re.sub(r'https://www.cancer.gov','',url) for url in about_urls]  
+      #date    = row.xpath('./td[2]/a/text()').extract_first()
+      # Align and ack Related items together to pass over to the parse details page pipeline:
+      zipped_name_url = list(zip(clean_about_urls, all_drugname)) 
+      # for url,namex in [['https://www.cancer.gov{}'.format(zip_url),name] for zip_url, name in zipped_name_url[:5]]:
+      for url,drugname in [['https://www.cancer.gov{}'.format(url),drugname] for url,drugname in zipped_name_url]:
+            print(f'Here it is!!! {drugname}')
+            meta = {}
+            meta['drug_name'] = drugname
+            yield Request(url=url, callback=self.parse_detail_page, meta = meta)     
+
+  def parse_detail_page(self, response):
+            # Some Drugs do not have listed US specific names
+            # or have combinations with:
+            # xpath('//div/table[@class="drug-combination"])
+            # So try both names US specific -- usbname or original name -- origname
+            usbname  = response.xpath('//div[@class="two-columns brand-fda"]/div[2]/text()')[0].get().lower()
+            combolinks = response.xpath('//table[@class="drug-combination"]/tbody/tr/td[2]/a/@href').getall()
+            print(response.xpath('//article/div/h1/text()').get())
+            if usbname: 
+                  print(usbname, "found this *************" ) 
+                  response.meta['usname'] = usbname
+            if combolinks: 
+                  print(combolinks[0],'or this==============')
+            origname = response.meta['drug_name']
+            print(origname)
+            print(usbname)
+            # response.meta['usname'] = usbname
+            # # Also get the cancer name that is shall treat
+            cancertype = response.xpath('//div[@class="accordion"]/ul/li/strong/a/text()').get()
+            print(cancertype, "HAHAHAHHAHAH")
+            if cancertype:
+                  response.meta['cancertype'] = cancertype
+            else:
+                  response.meta['cancertype'] = 'notfound'
+            # if usbname: 
+                #  fda     = response.xpath('//div[@class="two-columns brand-fda"]/div[2]/text()')[1].get().lower()
+                  # print('*'*50)
+                  # print(f'Generating url for drug {usbname}' )
+                  # print('*'*50)
+                  # https://www.drugs.com/price-guide/verzenio
+            drug_price_link = 'https://www.drugs.com/price-guide/'
+            drugurl = drug_price_link + usbname
+            # Some Drugs do not have listed US specific names for those use the name from 
+            # 
+            # elif origname:
+            #       print('='*50)
+            #       print(f'Generating url for drug {origname}' )
+            #       print('='*50)
+            #       drug_price_link = 'https://www.drugs.com/price-guide/'
+            #       drugurl = drug_price_link + origname
+            # else: print('No name is geenrated for drug. This shall not happen.')
+            # Need to add try / except in case the price listing does not exist!!!
+            yield Request(url=drugurl, callback=self.parse_drug_price, meta=response.meta) 
+
+  def parse_drug_price(self, response):
+            # This returns price in form of: $3,071.55 - need to convert to integer.!!!
+            pricetext   = response.xpath('//div[@class="contentBox pricingList"]/a/div[2]/text()').get().strip()
+
+            # The volume is returned in 50 mg format. Save both ? and multiply then?
+            packagetext = response.xpath('//div[@class="contentBox pricingList"]/a/div[1]/text()').get().strip()
+
+            # Drug name 
+            drugtext = response.xpath('//div[@class="contentBox pricingList"]/a/div[1]/span/text()').get().strip()
+
+            # how many units one gets? 'for 14 tablet' 
+            volumetext  = response.xpath('//div[@class="contentBox pricingList"]/a/div[2]/span/text()').get().strip()
+
+            # The description needs to be extracted for cancer types that the drug is used for.
+            # E.g: 'Verzenio (abemaciclib) is a member of the CDK 4/6 inhibitors drug class and is commonly used for Breast Cancer.'
+            descriptiontext = response.xpath('//div[@class="contentBox pricingBlock"]/p/text()').get()
+
+            dosagepath = 'https://www.drugs.com/dosage/'+ response.meta['drug_name'] +'.html'
+
+            response.meta['pricetext'] = pricetext
+            response.meta['packagetext'] = packagetext
+            response.meta['volumetext'] = volumetext
+            response.meta['descriptiontext'] = descriptiontext
+            response.meta['dosagepath'] = dosagepath
+
+            item = DrugItem()
+
+            item['cancer_drug_name']    = response.meta['drug_name']
+            # item['usname']              = drugtext 
+            item['us_brand_name']       = response.meta['usname']
+            # item['fda_approved']        = fda
+            item['cancer_to_treat']     = response.meta['cancertype']
+            item['drug_price']          = pricetext
+            item['units_per_package']   = packagetext
+            item['volume_per_unit']     = volumetext
+            item['description']         = descriptiontext
+            item['dosage']              = dosagepath
+            yield item
+            # yield Request(url=dosagepath, callback=self.parse_drug_dosage, meta=response.meta)
+
+  # def parse_drug_dosage(self,response):
+  #           response.xpath()
+  #           print(response.meta['drug_name'])
+            # item = DrugItem()
+
+            # item['cancer_drug_name']    = response.meta['drug_name']
+            # # item['usname']              = drugtext 
+            # item['us_brand_name']       = response.meta['usname']
+            # # item['fda_approved']        = fda
+            # item['cancer_to_treat']     = response.meta['cancertype']
+            # item['drug_price']          = pricetext
+            # item['units_per_package']   = packagetext
+            # item['volume_per_unit']     = volumetext
+            # item['description']         = descriptiontext
+            # item['dosage']              = dosagepath
+            # yield item
